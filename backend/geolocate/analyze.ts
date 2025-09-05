@@ -4,6 +4,7 @@ import { Bucket } from "encore.dev/storage/objects";
 import { generateObject } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
+import * as crypto from "crypto";
 
 const openAIKey = secret("OpenAIKey");
 const openai = createOpenAI({ apiKey: openAIKey() });
@@ -79,6 +80,47 @@ const geolocationSchema = z.object({
   }),
 });
 
+function isValidBase64(str: string): boolean {
+  try {
+    // Check if the string is valid base64
+    const decoded = Buffer.from(str, 'base64');
+    const reencoded = decoded.toString('base64');
+    
+    // Check if re-encoding gives the same result (accounting for padding)
+    const normalizedInput = str.replace(/\s/g, '');
+    const normalizedReencoded = reencoded.replace(/\s/g, '');
+    
+    return normalizedInput === normalizedReencoded && decoded.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function getImageMimeType(buffer: Buffer): string {
+  // Check for common image file signatures
+  if (buffer.length >= 8) {
+    // PNG signature
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      return 'image/png';
+    }
+    // JPEG signature
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+      return 'image/jpeg';
+    }
+    // GIF signature
+    if (buffer.toString('ascii', 0, 3) === 'GIF') {
+      return 'image/gif';
+    }
+    // WebP signature
+    if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
+      return 'image/webp';
+    }
+  }
+  
+  // Default to JPEG if we can't determine the type
+  return 'image/jpeg';
+}
+
 // Analyzes an image to determine its geographic location using AI.
 export const analyze = api<AnalyzeImageRequest, GeolocationResult>(
   { expose: true, method: "POST", path: "/analyze" },
@@ -95,20 +137,45 @@ export const analyze = api<AnalyzeImageRequest, GeolocationResult>(
     // If base64 image data is provided, upload it to object storage
     if (req.imageData) {
       try {
-        const imageBuffer = Buffer.from(req.imageData, 'base64');
-        imageHash = require('crypto').createHash('sha256').update(imageBuffer).digest('hex');
-        const fileName = `${imageHash}.jpg`;
+        // Clean the base64 string (remove any whitespace)
+        const cleanBase64 = req.imageData.replace(/\s/g, '');
+        
+        // Validate base64 format
+        if (!isValidBase64(cleanBase64)) {
+          throw APIError.invalidArgument("Invalid base64 format");
+        }
+        
+        const imageBuffer = Buffer.from(cleanBase64, 'base64');
+        
+        // Check if the buffer is not empty and has reasonable size
+        if (imageBuffer.length === 0) {
+          throw APIError.invalidArgument("Empty image data");
+        }
+        
+        if (imageBuffer.length > 50 * 1024 * 1024) { // 50MB limit
+          throw APIError.invalidArgument("Image too large (max 50MB)");
+        }
+        
+        // Verify it looks like an image file
+        const mimeType = getImageMimeType(imageBuffer);
+        const extension = mimeType.split('/')[1] || 'jpg';
+        
+        imageHash = crypto.createHash('sha256').update(imageBuffer).digest('hex');
+        const fileName = `${imageHash}.${extension}`;
         
         await imageUploads.upload(fileName, imageBuffer, {
-          contentType: 'image/jpeg'
+          contentType: mimeType
         });
         
         imageUrl = imageUploads.publicUrl(fileName);
       } catch (error) {
-        throw APIError.invalidArgument("Invalid base64 image data");
+        if (error instanceof Error && error.message.includes('APIError')) {
+          throw error;
+        }
+        throw APIError.invalidArgument(`Invalid base64 image data: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } else if (req.imageUrl) {
-      imageHash = require('crypto').createHash('sha256').update(req.imageUrl).digest('hex');
+      imageHash = crypto.createHash('sha256').update(req.imageUrl).digest('hex');
     }
 
     const analysisType = req.analysisType || "detailed";
