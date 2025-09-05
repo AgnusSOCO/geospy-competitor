@@ -185,6 +185,12 @@ export const analyze = api<AnalyzeImageRequest, GeolocationResult>(
     const systemPrompt = getSystemPrompt(analysisType, includeConfidence, includeReasoningSteps);
 
     try {
+      // Check if OpenAI key is available
+      const apiKey = openAIKey();
+      if (!apiKey || apiKey.trim() === '') {
+        throw APIError.internal("OpenAI API key not configured. Please set the OpenAI API key in the Infrastructure tab.");
+      }
+
       const result = await generateObject({
         model: openai("gpt-4o"),
         schema: geolocationSchema,
@@ -206,7 +212,9 @@ export const analyze = api<AnalyzeImageRequest, GeolocationResult>(
               }
             ]
           }
-        ]
+        ],
+        temperature: 0.3,
+        maxRetries: 2,
       });
 
       const processingTime = Date.now() - startTime;
@@ -220,7 +228,25 @@ export const analyze = api<AnalyzeImageRequest, GeolocationResult>(
         }
       };
     } catch (error) {
-      throw APIError.internal("Failed to analyze image", error);
+      console.error('AI analysis error:', error);
+      
+      // Handle specific OpenAI errors
+      if (error instanceof Error) {
+        if (error.message.includes('API key')) {
+          throw APIError.internal("OpenAI API key is invalid or not configured. Please check your API key configuration.");
+        }
+        if (error.message.includes('quota') || error.message.includes('rate limit')) {
+          throw APIError.resourceExhausted("OpenAI API quota exceeded or rate limit hit. Please try again later.");
+        }
+        if (error.message.includes('model') || error.message.includes('gpt-4o')) {
+          throw APIError.internal("OpenAI model not available. The API key may not have access to GPT-4o.");
+        }
+        if (error.message.includes('image')) {
+          throw APIError.invalidArgument("Image could not be processed by the AI model. Please try a different image.");
+        }
+      }
+      
+      throw APIError.internal(`Failed to analyze image: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 );
@@ -258,7 +284,13 @@ CONFIDENCE SCORING:
 - 50-69%: General regional identification with some uncertainty
 - 30-49%: Broad geographic area with limited specific indicators
 - 10-29%: Very general location based on basic climate/development indicators
-- 0-9%: Insufficient information for reliable geolocation`;
+- 0-9%: Insufficient information for reliable geolocation
+
+IMPORTANT CONSTRAINTS:
+- You must always provide valid coordinates (latitude between -90 and 90, longitude between -180 and 180)
+- You must always provide a country name
+- If specific location cannot be determined, provide your best educated guess based on available visual evidence
+- Confidence scores should reflect the actual certainty of your analysis`;
 
   const analysisSpecificPrompts = {
     quick: `
