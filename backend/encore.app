@@ -1,0 +1,1 @@
+{"id": "geospy-competitor-6qki", "lang": "typescript"}
